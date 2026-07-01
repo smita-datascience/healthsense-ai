@@ -1,0 +1,21 @@
+# --- Web / API ---
+fastapi
+uvicorn[standard]
+pydantic
+pydantic-settings
+python-dotenv
+
+# --- Data ---
+SQLAlchemy
+# sqlite ships with Python; uncomment for MySQL:
+# pymysql
+
+# --- Agentic stack (Phase 1+) ---
+crewai
+langchain
+langchain-anthropic
+anthropic
+
+# --- Testing ---
+pytest
+httpx
