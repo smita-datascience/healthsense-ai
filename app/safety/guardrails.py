@@ -1,9 +1,5 @@
-"""Safety guardrails for HealthSense AI — deterministic checks around the model.
-
-Input guardrail: detect emergencies BEFORE the agent runs, and route to real
-help instead of answering. This is a keyword stub; production would use a
-trained classifier + a framework like NeMo Guardrails.
-"""
+﻿"""Safety guardrails for HealthSense AI - hybrid emergency detection."""
+from app.core.llm import ask
 
 EMERGENCY_TERMS = [
     "chest pain", "can't breathe", "cant breathe", "not breathing",
@@ -13,18 +9,31 @@ EMERGENCY_TERMS = [
 ]
 
 EMERGENCY_MESSAGE = (
-    "⚠️ This may be a medical emergency. Please contact emergency services "
-    "immediately — in India call 112 (or 108 for an ambulance). "
+    "This may be a medical emergency. Please contact emergency services "
+    "immediately - in India call 112 (or 108 for an ambulance). "
     "If someone is in danger, do not wait for an online response."
 )
 
 
-def check_input(question: str) -> str | None:
-    """Return an emergency message if the input looks urgent, else None.
+def llm_emergency_check(question: str) -> bool:
+    prompt = (
+        "You are a medical safety screen. Decide if the message describes a "
+        "possible medical emergency needing immediate care such as severe chest "
+        "pain, trouble breathing, signs of stroke, severe bleeding, suicidal "
+        "thoughts, overdose, or loss of consciousness. When in doubt, treat it "
+        "as an emergency - a false alarm is acceptable, missing a real "
+        "emergency is not.\n\n"
+        f"Message: {question}\n\n"
+        "Answer with exactly one word: EMERGENCY or SAFE"
+    )
+    result = ask(prompt, max_tokens=10).strip().upper()
+    return "EMERGENCY" in result
 
-    None means 'safe to proceed to the agent'.
-    """
+
+def check_input(question: str):
     q = question.lower()
     if any(term in q for term in EMERGENCY_TERMS):
+        return EMERGENCY_MESSAGE
+    if llm_emergency_check(question):
         return EMERGENCY_MESSAGE
     return None
