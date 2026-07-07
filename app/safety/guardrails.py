@@ -37,3 +37,26 @@ def check_input(question: str):
     if llm_emergency_check(question):
         return EMERGENCY_MESSAGE
     return None
+def check_output(answer: str) -> str:
+    """Output guardrail: screen the ANSWER before the user sees it.
+
+    Catches two risks even a safe question can produce:
+    - specific medication dosing
+    - diagnostic language ('you have X')
+    If found, append a stronger caution rather than blocking the answer.
+    """
+    a = answer.lower()
+
+    dosing_terms = ["mg ", "milligram", "dosage", "take ", "tablets", "pills a day"]
+    diagnosis_terms = ["you have", "you likely have", "you are suffering from", "diagnosis is"]
+
+    flagged = any(t in a for t in dosing_terms) or any(t in a for t in diagnosis_terms)
+
+    if flagged:
+        return (
+            answer
+            + "\n\n**Important:** This response may touch on specific dosing or "
+            "diagnosis. Do not act on it without confirming with a licensed "
+            "healthcare professional — only they can advise on your situation."
+        )
+    return answer
