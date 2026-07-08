@@ -4,7 +4,7 @@ from crewai import Agent, Task, Crew, Process, LLM
 from config.settings import settings
 from app.memory.memory import recent_history, save_interaction
 from app.agents.tools import search_health_knowledge
-from app.safety.guardrails import check_output
+from app.safety.guardrails import check_input, check_output
 
 llm = LLM(model=f"anthropic/{settings.llm_model}", temperature=0.2)
 
@@ -34,7 +34,13 @@ explainer_agent = Agent(
 
 
 def answer(question: str, user_id: str = "demo_user") -> str:
-    """Run the triage -> explainer crew, with memory and output guardrail."""
+    """Run the triage -> explainer crew, with memory and guardrails."""
+    # INPUT GUARDRAIL: emergency check BEFORE the agent runs
+    emergency = check_input(question)
+    if emergency:
+        save_interaction(user_id, question, emergency)
+        return emergency
+
     history = recent_history(user_id, limit=3)
     history_block = f"\nRecent conversation:\n{history}\n" if history else ""
 
