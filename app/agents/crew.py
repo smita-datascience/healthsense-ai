@@ -79,6 +79,8 @@ def answer(question: str, user_id: str = "demo_user") -> str:
     )
     result = str(crew.kickoff())
 
-    result = check_output(result)
+    blocked = check_output(result)
+    if blocked:
+        result = blocked
     save_interaction(user_id, question, result)
     return result

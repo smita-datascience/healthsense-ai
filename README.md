@@ -1,4 +1,5 @@
 # HealthSense AI
+![Architecture](architecture.png)
 
 A multi-agent health-information assistant built with CrewAI, LangChain, FastAPI, and Anthropic Claude. A user's question passes through a safety gate, a triage agent, and an explainer agent that grounds its answer in a knowledge base via RAG — with conversation memory throughout, served as a documented API.
 

@@ -1,5 +1,6 @@
 ﻿"""Safety guardrails for HealthSense AI - hybrid emergency detection."""
 from app.core.llm import ask
+import re
 
 EMERGENCY_TERMS = [
     "chest pain", "can't breathe", "cant breathe", "not breathing",
@@ -38,25 +39,49 @@ def check_input(question: str):
         return EMERGENCY_MESSAGE
     return None
 def check_output(answer: str) -> str:
-    """Output guardrail: screen the ANSWER before the user sees it.
+   import re
 
-    Catches two risks even a safe question can produce:
-    - specific medication dosing
-    - diagnostic language ('you have X')
-    If found, append a stronger caution rather than blocking the answer.
+BLOCKED_MESSAGE = (
+    "I can't share that response. It contained specific dosing or diagnostic "
+    "language, which only a licensed healthcare professional can safely give "
+    "you. Please speak to a doctor or pharmacist about your situation.\n\n"
+    "I'm happy to explain conditions, terminology, or general health topics instead."
+)
+
+# Specific dosing instructions: a number attached to a unit, or an explicit
+# instruction to take/adjust medication.
+DOSING_PATTERNS = [
+    r"\b\d+\s?(mg|mcg|ml|g|units?|iu)\b",          # "500 mg", "2 units"
+    r"\btake\s+(\d+|one|two|three|a|an)\b.*\b(tablet|capsule|pill|dose|drop)",
+    r"\b(increase|decrease|double|halve|stop taking)\b.*\b(dose|dosage|medication|tablet|insulin)",
+    r"\b(once|twice|three times)\s+(a|per)\s+day\b.*\b(tablet|capsule|pill|dose|mg)",
+    r"\byour (dose|dosage) (should|would) be\b",
+]
+
+# Diagnostic claims: telling the user what they have, or ruling something out.
+DIAGNOSIS_PATTERNS = [
+    r"\byou (have|likely have|probably have|are suffering from)\b",
+    r"\byou (don't|do not) have\b",
+    r"\b(this|it) is (almost certainly|definitely|clearly)\b",
+    r"\byour (diagnosis|test results?) (is|are|indicate|show)\b",
+    r"\bi can confirm\b",
+    r"\bno need to see a (doctor|physician|gp)\b",
+    r"\byou can (safely )?ignore\b",
+]
+
+
+def check_output(answer: str):
+    """Output guardrail. Returns None if safe, or a safe replacement if not.
+
+    Mirrors check_input's convention: None means 'nothing wrong'.
+    Unlike the previous version, unsafe text is WITHHELD, not annotated.
+    Rationale: a caution appended below dosing advice still leaves the
+    dosing advice on screen. In an asymmetric-cost domain, withhold.
     """
     a = answer.lower()
 
-    dosing_terms = ["mg ", "milligram", "dosage", "take ", "tablets", "pills a day"]
-    diagnosis_terms = ["you have", "you likely have", "you are suffering from", "diagnosis is"]
+    for pattern in DOSING_PATTERNS + DIAGNOSIS_PATTERNS:
+        if re.search(pattern, a):
+            return BLOCKED_MESSAGE
 
-    flagged = any(t in a for t in dosing_terms) or any(t in a for t in diagnosis_terms)
-
-    if flagged:
-        return (
-            answer
-            + "\n\n**Important:** This response may touch on specific dosing or "
-            "diagnosis. Do not act on it without confirming with a licensed "
-            "healthcare professional — only they can advise on your situation."
-        )
-    return answer
+    return None
