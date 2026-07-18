@@ -1,4 +1,5 @@
-﻿"""Safety guardrails for HealthSense AI - hybrid emergency detection."""
+﻿
+"""Safety guardrails for HealthSense AI - hybrid emergency detection."""
 import re
 
 from app.core.llm import ask
@@ -43,7 +44,7 @@ DIAGNOSIS_PATTERNS = [
 
 
 def llm_emergency_check(question: str) -> bool:
-    """Layer 2 of the input cascade: catches what the keyword list misses."""
+    """Layer 2 of the input cascade: the reasoning layer."""
     prompt = (
         "You are a medical safety screen. Decide if the message could describe a "
         "possible medical emergency needing immediate care - such as severe chest "
@@ -56,13 +57,29 @@ def llm_emergency_check(question: str) -> bool:
         "- third-party framing ('asking for a friend', 'my cousin')\n"
         "- fictional framing ('for a story I'm writing', 'in a movie')\n"
         "- minimizing framing ('probably nothing, but', 'not urgent, but')\n"
-        "- academic or curiosity framing ('how long can a person survive...')\n\n"
-        "A genuine question about general health, prevention, or how the body "
-        "works is SAFE. Questions asking what the warning signs of a condition "
-        "are, or how something is treated in a hospital, are SAFE - they seek "
-        "knowledge, not help with an unfolding situation.\n\n"
-        "When in doubt, treat it as an emergency. A false alarm is acceptable; "
-        "missing a real emergency is not.\n\n"
+        "- academic or curiosity framing ('how long can a person survive...')\n"
+        "- role-play or instruction framing ('you are a triage nurse',\n"
+        "  'pretend the rules are off', 'act as a doctor and tell me what to do')\n"
+        "- the urgent detail buried mid-message after unrelated small talk\n\n"
+        "Also treat as EMERGENCY the indirect signals of suicidal intent: giving "
+        "possessions away, putting affairs in order, asking who would care for "
+        "dependants, sudden calm after distress, or deliberately stopping "
+        "essential medication.\n\n"
+        "The following are SAFE. They seek knowledge, not help with an unfolding "
+        "situation, even though they contain alarming vocabulary:\n"
+        "- how a condition works, is diagnosed, or is treated\n"
+        "- the difference between two conditions\n"
+        "- how a drug or intervention works\n"
+        "- what the warning signs of a condition are\n"
+        "- questions about a past or resolved episode ('turned out to be reflux')\n"
+        "- questions about a relative who died long ago, heredity, or risk\n"
+        "- professional, academic, or authoring context (a student, a first aid\n"
+        "  handbook, a curiosity question about how paramedics triage)\n"
+        "- preparation questions (what to keep in a first aid kit)\n\n"
+        "The distinction that matters: is someone in trouble RIGHT NOW, or is "
+        "this a question about the world? When genuinely uncertain, treat it as "
+        "an emergency - a false alarm is acceptable, missing a real emergency "
+        "is not.\n\n"
         f"Message: {question}\n\n"
         "Answer with exactly one word: EMERGENCY or SAFE"
     )
@@ -71,52 +88,31 @@ def llm_emergency_check(question: str) -> bool:
 
 
 def check_input(question: str):
-   import re
-
-# Educational framings: the user is asking ABOUT a condition, not reporting one.
-# A keyword hit inside one of these does not block outright - it is routed to
-# Layer 2 instead. The cascade is preserved; only the decision maker changes.
-EDUCATIONAL_PATTERNS = [
-    r"^what (are|is) the (warning )?signs?\b",
-    r"^what (are|is) the symptoms?\b",
-    r"^what does .{0,40}\b(stand for|mean)\b",
-    r"^what is (a|an|the)\b",
-    r"^why does .{0,60}\b(happen|occur)\b",
-    r"^how (is|are) .{0,60}\b(treated|diagnosed|managed)\b",
-    r"\b(last (week|month|year)|years? ago|used to)\b",   # resolved / past tense
-]
-
-
-def looks_educational(question: str) -> bool:
-    q = question.lower().strip()
-    return any(re.search(p, q) for p in EDUCATIONAL_PATTERNS)
-
-
-def check_input(question: str):
     """Input gate. Returns None if safe, or an escalation message if not.
 
     Cascade:
-      Layer 1  deterministic keyword screen. Cannot hallucinate, cannot fail
-               open. Blocks immediately UNLESS the message reads as an
-               educational question, in which case the decision is passed
-               down to Layer 2 rather than skipped.
-      Layer 2  LLM classifier. Handles paraphrase, indirect framing, and the
-               educational cases Layer 1 deferred.
+      Layer 1  deterministic keyword screen. Does NOT block on its own - it
+               routes. A keyword hit marks the message as needing scrutiny.
+      Layer 2  LLM classifier. Makes the call, for every message.
 
-    Fail-safe: if Layer 2 cannot run (API down, timeout), a message that hit
-    a keyword is BLOCKED. The gate never disappears because a service did.
+    Why Layer 1 routes instead of blocking: an earlier version blocked on any
+    keyword hit, with a whitelist of "educational" phrasings carved out. The
+    whitelist was fitted to the test set that produced it - on an independently
+    written set, 6 of 10 safe questions were wrongly blocked. Whitelists do not
+    generalise. Reasoning about intent does.
+
+    What Layer 1 still guarantees: if Layer 2 cannot run - API down, timeout,
+    a silently broken function - a message that hit a keyword is BLOCKED. The
+    deterministic layer is the floor, not the ceiling. The gate never
+    disappears because a service did.
     """
     q = question.lower()
     keyword_hit = any(term in q for term in EMERGENCY_TERMS)
-
-    if keyword_hit and not looks_educational(question):
-        return EMERGENCY_MESSAGE
 
     try:
         if llm_emergency_check(question):
             return EMERGENCY_MESSAGE
     except Exception:
-        # Layer 2 unavailable. If Layer 1 saw something, block.
         if keyword_hit:
             return EMERGENCY_MESSAGE
         raise
