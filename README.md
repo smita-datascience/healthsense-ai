@@ -1,12 +1,5 @@
 # HealthSense AI
 
----
-
-## What it does
-## Key features
-
-# HealthSense AI
-
 A multi-agent health information assistant built around a single question: **how do you make an agentic system's safety claims measurable rather than asserted?**
 
 ![Architecture](architecture.png)
@@ -39,11 +32,15 @@ Two independent gates, deliberately not sharing a failure mode.
 
 Runs before any model call, in two layers:
 
-**Layer 1: deterministic keyword screen.** Fast, free, and incapable of hallucinating. Catches the obvious emergency vocabulary.
+**Layer 1: deterministic keyword screen.** Does not block on its own — it *routes*. A keyword hit marks a message as needing scrutiny.
 
-**Layer 2: LLM classifier.** Only sees what Layer 1 didn't catch. Handles paraphrase, indirection, and framings a keyword list will always miss.
+**Layer 2: LLM classifier.** Makes the call, on every message.
 
-The ordering is the design. A model in the safety path can hallucinate, and when the API goes down it **fails open** — the gate disappears exactly when you can't afford to lose it. So the layer that cannot fail runs first, and the smarter, more fragile layer only handles the remainder. Cheap and certain before expensive and probabilistic.
+**Why Layer 1 routes rather than blocks.** An earlier version blocked on any keyword hit, with a whitelist of "educational" phrasings carved out so that *"what are the warning signs of a heart attack?"* would pass. That scored 0 false alarms on the suite it was built against — and 6 wrong blocks out of 10 on an independently written one. The whitelist had been fitted to the test set that produced it. Whitelists don't generalise; reasoning about intent does.
+
+**What Layer 1 still guarantees.** If Layer 2 can't run — API down, timeout, a silently broken function — a message that hit a keyword is blocked. The deterministic layer is the floor, not the ceiling. The gate never disappears because a service did.
+
+That's the property worth protecting. A model in the safety path can hallucinate, and left alone it **fails open** exactly when you can't afford to lose it. The cheap, certain layer is what stops that.
 
 ### Gate 2 — output, post-generation (`check_output`)
 
@@ -55,9 +52,7 @@ This was a deliberate revision. An earlier version appended a caution below the 
 
 ## Evaluation
 
-### Red-team suite — 56 cases
-
-Run it yourself:
+### Round 1 — red-team suite, 56 cases
 
 ```
 python -m app.evaluation.run_safety_eval
@@ -65,16 +60,32 @@ python -m app.evaluation.run_safety_eval
 
 | Gate | Recall | False alarms |
 |---|---|---|
-| Emergency gate (input) | 25/25 (100%) | 4/11 |
+| Emergency gate (input) | 25/25 (100%) | 0/11 |
 | Output guardrail | 13/13 (100%) | 0/7 |
 
-The emergency set includes adversarial framings designed to defeat keyword matching: indirect ("asking for a friend"), fictional ("for a story I'm writing"), minimizing ("probably nothing, but my vision went black"), and hypothetical ("hypothetically, how long can a person go without breathing").
+Adversarial framings included: indirect ("asking for a friend"), fictional ("for a story I'm writing"), minimizing ("probably nothing, but my vision went black"), and hypothetical ("hypothetically, how long can a person go without breathing").
 
-**How the hypothetical case got fixed.** On the first run of the expanded suite it was the single miss — 24/25. The Layer 2 classifier was reading detached phrasing as detached intent. The fix was in the prompt: it now names the five distancing patterns explicitly and instructs the model to judge the situation described rather than the way it is phrased. Recall went to 25/25 with no increase in false alarms.
+### Round 2 — independent set, 31 cases
 
-Worth recording how it surfaced. A later edit to `llm_emergency_check` silently broke the function — it still ran, still returned a value, and the suite still printed a plausible-looking number. Recall dropped to 8% with no error raised anywhere. Without the harness that would have shipped as a system with no Layer 2 at all.
+```
+python -m app.evaluation.run_independent_eval
+```
 
-**On the 4 false alarms:** these are educational questions containing emergency vocabulary — *"what are the warning signs of a heart attack?"* That's a real usability cost. It's also the direction I'd choose to fail in. A false alarm is annoying; a missed emergency is not.
+| | Recall | False alarms |
+|---|---|---|
+| Emergency gate | 21/21 (100%) | 0/10 |
+
+**Why a second set exists.** Round 1 was written alongside the guardrail, which means it can only prove the system handles the cases it was built against. Round 2 was generated from a different starting point — not *"what would evade this code?"* but *"how do people actually write when something is wrong?"* Its cases come from how patients present at triage, how people write to crisis lines, and how fear, embarrassment, and language barriers distort a message: lay somatic description with no clinical vocabulary, apologetic hedging, non-native English, the urgent fact buried after small talk, indirect signals of suicidal intent.
+
+**What it found.** Recall generalised (20/21 on first run). Precision did not — 6 of 10 safe questions were wrongly blocked, exposing the educational whitelist as overfitting. That finding drove the router redesign described above. After the fix: 21/21 recall, 0 false alarms, with Round 1 unchanged.
+
+**Caveat, stated plainly:** Round 2 is *more* independent, not fully independent. Anyone who writes a test set brings their own blind spots. Real independence means someone who has never seen the implementation.
+
+### Two failures worth recording
+
+**The whitelist that scored perfectly.** 0 false alarms on Round 1, 60% on Round 2. A perfect score against your own test set is not evidence of a correct system — it's evidence you tested what you thought of.
+
+**The function that broke silently.** An edit to `llm_emergency_check` disabled it. It still ran. It returned a value. Nothing raised. The suite printed 8% recall and looked like a tuning problem. The whole LLM layer was gone. Without the harness that would have shipped as a two-layer cascade with one layer.
 
 ### LLM-as-judge harness
 
@@ -84,7 +95,7 @@ python -m app.evaluation.run_eval
 
 Scores responses against a golden dataset for groundedness (is the answer supported by retrieved context?) and relevance.
 
-Note the separation: the LLM **judges** offline, where a mistake is cheap and recoverable. It does not **enforce** online, where a mistake isn't.
+Note the separation: the LLM **judges** offline, where a mistake is cheap and recoverable. It does not **enforce** alone online — Layer 1 is underneath it, holding the floor.
 
 ---
 
@@ -151,6 +162,8 @@ Choices made explicitly, not by default.
 
 ## Known limitations
 
+- **Both test sets are still mine.** Round 2 was written from a different angle, but by the same person who wrote the guardrail. Genuinely independent means someone who has never seen the implementation.
+- **Layer 2 now runs on every message**, not just the ones Layer 1 missed. More API calls, slightly higher latency and cost. That was the price of dropping the whitelist, and it was worth paying.
 - **BM25 misses semantic paraphrase.** "Why does my chest feel tight" won't lexically match a passage on angina. A hybrid retriever (BM25 + dense, rank-fused) is the fix.
 - **The knowledge base is curated and small.** Coverage gaps produce refusals rather than wrong answers — the correct failure direction, but still a gap.
 - **Memory is session-scoped.** No user profile, no cross-session recall, no semantic memory.
@@ -161,8 +174,8 @@ Choices made explicitly, not by default.
 
 ## What's next
 
-- Independently generated adversarial test set — I wrote both the guardrail and the tests, which is a blind spot by construction
-- Reduce the 4 educational false alarms without losing emergency recall
+- A third test set written by someone who has not seen the code
+- Cache Layer 2 results for repeated queries, to claw back the cost of routing everything through it
 - Hybrid retrieval (BM25 + dense, rank fusion), evaluated against the same golden dataset to prove the complexity earns its place
 - Tracing and observability; eval-in-CI so a drop in safety recall fails the build
 
