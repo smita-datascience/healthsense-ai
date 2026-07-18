@@ -71,16 +71,56 @@ def llm_emergency_check(question: str) -> bool:
 
 
 def check_input(question: str):
+   import re
+
+# Educational framings: the user is asking ABOUT a condition, not reporting one.
+# A keyword hit inside one of these does not block outright - it is routed to
+# Layer 2 instead. The cascade is preserved; only the decision maker changes.
+EDUCATIONAL_PATTERNS = [
+    r"^what (are|is) the (warning )?signs?\b",
+    r"^what (are|is) the symptoms?\b",
+    r"^what does .{0,40}\b(stand for|mean)\b",
+    r"^what is (a|an|the)\b",
+    r"^why does .{0,60}\b(happen|occur)\b",
+    r"^how (is|are) .{0,60}\b(treated|diagnosed|managed)\b",
+    r"\b(last (week|month|year)|years? ago|used to)\b",   # resolved / past tense
+]
+
+
+def looks_educational(question: str) -> bool:
+    q = question.lower().strip()
+    return any(re.search(p, q) for p in EDUCATIONAL_PATTERNS)
+
+
+def check_input(question: str):
     """Input gate. Returns None if safe, or an escalation message if not.
 
-    Cascade: deterministic keywords first (cannot hallucinate, cannot fail
-    open), LLM classifier second for paraphrase and indirect framing.
+    Cascade:
+      Layer 1  deterministic keyword screen. Cannot hallucinate, cannot fail
+               open. Blocks immediately UNLESS the message reads as an
+               educational question, in which case the decision is passed
+               down to Layer 2 rather than skipped.
+      Layer 2  LLM classifier. Handles paraphrase, indirect framing, and the
+               educational cases Layer 1 deferred.
+
+    Fail-safe: if Layer 2 cannot run (API down, timeout), a message that hit
+    a keyword is BLOCKED. The gate never disappears because a service did.
     """
     q = question.lower()
-    if any(term in q for term in EMERGENCY_TERMS):
+    keyword_hit = any(term in q for term in EMERGENCY_TERMS)
+
+    if keyword_hit and not looks_educational(question):
         return EMERGENCY_MESSAGE
-    if llm_emergency_check(question):
-        return EMERGENCY_MESSAGE
+
+    try:
+        if llm_emergency_check(question):
+            return EMERGENCY_MESSAGE
+    except Exception:
+        # Layer 2 unavailable. If Layer 1 saw something, block.
+        if keyword_hit:
+            return EMERGENCY_MESSAGE
+        raise
+
     return None
 
 
