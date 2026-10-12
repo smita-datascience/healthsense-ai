@@ -144,6 +144,14 @@ uvicorn app.main:app --reload
 
 ---
 
+## v2: WhatsApp channel (in progress)
+
+HealthSense can now be reached on WhatsApp through Meta's Cloud API. The channel is a thin layer over the same `answer()` function the API uses, so both safety gates run unchanged and the evaluation numbers above still describe what a WhatsApp user gets.
+
+The channel adds its own fail-closed check (webhook signature verification), drops duplicate deliveries, and stores conversation memory under a hashed id rather than the user's phone number. Details, decisions and known limits: [ARCHITECTURE_WHATSAPP.md](ARCHITECTURE_WHATSAPP.md). Tests: `python -m pytest tests/test_whatsapp.py -v`.
+
+---
+
 ## Design tradeoffs
 
 Choices made explicitly, not by default.

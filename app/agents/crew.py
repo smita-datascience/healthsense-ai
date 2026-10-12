@@ -6,7 +6,7 @@ from app.memory.memory import recent_history, save_interaction
 from app.agents.tools import search_health_knowledge
 from app.safety.guardrails import check_input, check_output
 
-llm = LLM(model=f"anthropic/{settings.llm_model}", temperature=0.2)
+llm = LLM(model=f"anthropic/{settings.llm_model}")
 
 triage_agent = Agent(
     role="Health Triage Specialist",

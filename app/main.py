@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from app.api.routes import router
+from app.whatsapp.routes import router as whatsapp_router
 from app.db.database import Base, engine
 from config.settings import settings
 
@@ -22,6 +23,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title=settings.app_name, lifespan=lifespan)
 app.include_router(router)
+app.include_router(whatsapp_router)
 
 
 @app.get("/")

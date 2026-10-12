@@ -15,5 +15,15 @@ class Settings(BaseSettings):
     llm_model: str = "claude-sonnet-4-5"
     llm_provider: str = "anthropic"
 
+    # --- WhatsApp Cloud API (v2) ---
+    # From Meta: App > WhatsApp > API Setup ("Try it out" page)
+    whatsapp_access_token: str = ""
+    whatsapp_phone_number_id: str = ""
+    # From Meta: App settings > Basic > App secret (used to verify signatures)
+    whatsapp_app_secret: str = ""
+    # A password YOU invent; paste the same text into Meta's webhook form.
+    whatsapp_verify_token: str = ""
+    whatsapp_api_version: str = "v25.0"
+
 
 settings = Settings()

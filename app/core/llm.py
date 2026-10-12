@@ -30,7 +30,7 @@ def ask(prompt: str, max_tokens: int = 300) -> str:
     message = client.messages.create(
         model=settings.llm_model,
         max_tokens=max_tokens,
-        temperature=0.2,
+        
         messages=[{"role": "user", "content": prompt}],
     )
     return message.content[0].text

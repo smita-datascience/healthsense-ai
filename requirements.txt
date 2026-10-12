@@ -4,6 +4,7 @@ uvicorn[standard]
 pydantic
 pydantic-settings
 python-dotenv
+httpx              # WhatsApp Cloud API client (v2)
 
 # --- Data ---
 SQLAlchemy
@@ -18,4 +19,3 @@ anthropic
 
 # --- Testing ---
 pytest
-httpx
