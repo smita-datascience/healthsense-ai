@@ -1,4 +1,4 @@
-﻿"""Safety guardrails for HealthSense AI - hybrid emergency detection."""
+"""Safety guardrails for HealthSense AI - hybrid emergency detection."""
 import re
 import unicodedata
 
@@ -212,20 +212,76 @@ def check_input(question: str, lang: str | None = None):
     return None
 
 
+def llm_output_check(answer: str) -> bool:
+    """Layer 2 of the output cascade: the reasoning layer. True = UNSAFE.
+
+    Only called on answers the patterns flagged. Its job is to tell apart
+    sentences that look alike but mean different things:
+        "you have a migraine"                      -> diagnosis      -> UNSAFE
+        "see a doctor if you have a weak immune system" -> a warning -> SAFE
+    """
+    prompt = (
+        "You are the final safety check on a health information assistant's "
+        "answer, just before it is sent to a member of the public. A keyword "
+        "filter flagged this answer. Decide if it is UNSAFE.\n\n"
+        "UNSAFE means ANY part of the answer does one of these:\n"
+        "- tells the reader they have, or do not have, a specific condition "
+        "(a diagnosis, or reassurance that rules something out)\n"
+        "- gives a specific dose, amount or schedule for a medicine, or tells "
+        "them to start, stop, increase or decrease a medicine\n"
+        "- tells them they do not need to see a doctor, or can ignore a symptom\n\n"
+        "These are SAFE, even though the wording can look similar:\n"
+        "- conditional warnings: 'see a doctor if you have...', 'seek care if "
+        "your fever lasts more than 3 days'\n"
+        "- general education about how a condition, test or medicine works\n"
+        "- facts about people in general ('most adults need 7-9 hours of sleep')\n"
+        "- telling them to follow the label or ask a doctor or pharmacist about "
+        "doses\n\n"
+        "A conditional or a referral does not make unsafe content safe: 'if you "
+        "have a headache, take two 500mg tablets' is UNSAFE, and so is a "
+        "diagnosis followed by 'see a doctor if it gets worse'.\n\n"
+        "When genuinely uncertain, answer UNSAFE - withholding a safe answer is "
+        "an annoyance, sending an unsafe one is not.\n\n"
+        f"Answer to check:\n{answer}\n\n"
+        "Reply with exactly one word: UNSAFE or SAFE"
+    )
+    result = ask(prompt, max_tokens=10).strip().upper()
+    return "UNSAFE" in result
+
+
 def check_output(answer: str, lang: str = "en"):
     """Output guardrail. Returns None if safe, or a safe replacement if not.
 
-    The patterns are English, so this is run on the English answer BEFORE it
-    is translated (see app/core/language.py). `lang` only picks which
-    language the replacement message is shown in.
+    Cascade - the same shape as the input gate:
+      Layer 1  regex patterns (dosing, diagnosis, discouraging care). No match
+               -> the answer passes. A match does NOT block on its own - it
+               routes the answer to Layer 2.
+      Layer 2  LLM judge reads the flagged answer and makes the call.
+      Floor    if Layer 2 cannot run (API down, timeout), a flagged answer is
+               BLOCKED. The patterns are the floor, not the ceiling.
+
+    Why: the patterns alone blocked a correct fever answer because it said
+    "see a doctor if... you have underlying health conditions" - the same words
+    as the diagnosis "you have a migraine". Words cannot tell those apart;
+    reading for meaning can.
+
+    The patterns are English, so this runs on the English answer BEFORE it is
+    translated (see app/core/language.py). `lang` only picks which language the
+    replacement message is shown in.
 
     Unsafe text is WITHHELD, not annotated: a caution appended below dosing
     advice still leaves the dosing advice on screen.
     """
     a = answer.lower()
+    flagged = any(re.search(p, a) for p in DOSING_PATTERNS + DIAGNOSIS_PATTERNS)
+    if not flagged:
+        return None
 
-    for pattern in DOSING_PATTERNS + DIAGNOSIS_PATTERNS:
-        if re.search(pattern, a):
-            return BLOCKED_MESSAGES.get(lang, BLOCKED_MESSAGE)
+    blocked_message = BLOCKED_MESSAGES.get(lang, BLOCKED_MESSAGE)
+    try:
+        if llm_output_check(answer):
+            return blocked_message
+    except Exception:
+        return blocked_message  # fail safe: flagged + judge unavailable = block
 
     return None

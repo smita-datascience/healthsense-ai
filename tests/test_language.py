@@ -56,15 +56,18 @@ def test_emergency_message_language_when_llm_flags_it(monkeypatch):
     assert guardrails.check_input("माँ बेहोश हो गई हैं") == guardrails.EMERGENCY_MESSAGES["hi"]
 
 
-def test_blocked_message_is_in_requested_language():
+def test_blocked_message_is_in_requested_language(monkeypatch):
+    monkeypatch.setattr(guardrails, "llm_output_check", lambda a: True)
     unsafe = "You have diabetes. Take 500 mg twice a day."
     assert guardrails.check_output(unsafe, "hi") == guardrails.BLOCKED_MESSAGES["hi"]
     assert guardrails.check_output(unsafe, "hinglish") == guardrails.BLOCKED_MESSAGES["hinglish"]
     assert guardrails.check_output(unsafe) == guardrails.BLOCKED_MESSAGE
 
 
-def test_number_unit_dosing_is_caught_in_hindi_text():
-    # The second, post-translation pass relies on this.
+def test_number_unit_dosing_is_flagged_in_hindi_text(monkeypatch):
+    # The second, post-translation pass relies on this: "500 mg" is flagged in
+    # any script, and with the judge unavailable a flagged answer is blocked.
+    monkeypatch.setattr(guardrails, "llm_output_check", _layer2_down)
     assert guardrails.check_output("दिन में दो बार 500 mg लें", "hi") is not None
 
 
