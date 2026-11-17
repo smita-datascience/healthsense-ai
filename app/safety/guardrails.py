@@ -1,15 +1,62 @@
-﻿
-"""Safety guardrails for HealthSense AI - hybrid emergency detection."""
+﻿"""Safety guardrails for HealthSense AI - hybrid emergency detection."""
 import re
+import unicodedata
 
 from app.core.llm import ask
 
 EMERGENCY_TERMS = [
+    # --- English ---
     "chest pain", "can't breathe", "cant breathe", "not breathing",
     "suicide", "kill myself", "self harm", "self-harm",
     "overdose", "unconscious", "stroke", "severe bleeding",
     "heart attack", "choking",
+
+    # --- Hindi (Devanagari) and Hinglish (Hindi in Roman letters) ---
+    # Written from red-flag CONCEPTS (chest pain, breathlessness, fainting,
+    # overdose/poisoning, suicidal intent, bleeding, stroke signs, airway),
+    # NOT copied from the multilingual test messages - fitting keywords to
+    # the test set is the overfitting mistake the Layer 1 redesign fixed.
+    # Devanagari is matched after _normalise() (see below), so spelling
+    # variants like साँस/सांस or ख़/ख need only one entry.
+    # Chest pain / heart
+    "सीने में दर्द", "छाती में दर्द", "दिल का दौरा",
+    "seene mein dard", "sine mein dard", "seene me dard", "chhati mein dard",
+    "chest mein dard", "chest mein pressure", "dil ka daura",
+    # Breathing
+    "सांस नहीं", "सांस लेने में", "सांस रुक",
+    "saans nahi", "sans nahi", "saas nahi", "saans lene mein", "saans ruk",
+    # Fainting / unresponsive
+    "बेहोश", "होश नहीं", "behosh", "hosh nahi",
+    # Overdose / poisoning
+    "गोलियां खा", "गोली खा", "ज्यादा दवा", "जहर", "पी लिया", "निगल लिया",
+    "goliyan kha", "goliya kha", "goli kha li", "zyada dawa", "jyada dawa",
+    "zeher", "zehar", "jahar", "nigal liya",
+    # Suicidal intent
+    "जीने का मन नहीं", "मरना चाहत", "आत्महत्या", "खत्म कर",
+    "jeene ka mann nahi", "jine ka man nahi", "marna chahta", "marna chahti",
+    "khudkushi", "aatmahatya", "khatam karna", "khatam kar dena",
+    # Bleeding
+    "खून बह", "खून रुक", "khoon ruk", "khoon beh", "khun ruk", "khun beh",
+    # Stroke signs
+    "लकवा", "चेहरा एक तरफ", "मुंह टेढ़ा", "बोल नहीं पा",
+    "lakwa", "muh tedha", "munh tedha", "bol nahi pa", "haath pair kaam nahi",
+    # Airway
+    "गला बंद", "gala band",
 ]
+
+
+def _normalise(text: str) -> str:
+    """Lower-case, and fold common Devanagari spelling variants together.
+
+    - NFD splits pre-composed nukta letters (e.g. U+0959 ख़) into base + nukta,
+      then the nukta (U+093C) is dropped: ख़ -> ख, फ़ -> फ, ज़ -> ज.
+    - Chandrabindu (U+0901) becomes anusvara (U+0902): साँस -> सांस.
+    Without this, the same word typed two ways would miss the keyword floor.
+    """
+    t = unicodedata.normalize("NFD", text.lower())
+    t = t.replace("\u093c", "").replace("\u0901", "\u0902")
+    return unicodedata.normalize("NFC", t)
+
 
 EMERGENCY_MESSAGE = (
     "This may be a medical emergency. Please contact emergency services "
@@ -106,8 +153,8 @@ def check_input(question: str):
     deterministic layer is the floor, not the ceiling. The gate never
     disappears because a service did.
     """
-    q = question.lower()
-    keyword_hit = any(term in q for term in EMERGENCY_TERMS)
+    q = _normalise(question)
+    keyword_hit = any(_normalise(term) in q for term in EMERGENCY_TERMS)
 
     try:
         if llm_emergency_check(question):
