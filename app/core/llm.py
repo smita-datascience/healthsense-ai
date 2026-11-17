@@ -23,15 +23,16 @@ def get_client() -> Anthropic:
 def ask(prompt: str, max_tokens: int = 300) -> str:
     """Send one prompt to the model and return its text reply.
 
-    Low temperature (0.2) on purpose: caution + consistency for a health
-    assistant, and reliable, well-formed output. (Block 1: low temp = sharper
-    distribution = the model stays on its most-confident path.)
+    No temperature is set: the Anthropic Python SDK this project uses (2.x)
+    has no temperature argument on messages.create - passing one raises a
+    TypeError. (An earlier comment here claimed "temperature 0.2"; the code
+    never set it.) So LLM verdicts can vary slightly between runs: run the
+    safety evals more than once before quoting a number.
     """
     client = get_client()
     message = client.messages.create(
         model=settings.llm_model,
         max_tokens=max_tokens,
-        
         messages=[{"role": "user", "content": prompt}],
     )
     return message.content[0].text

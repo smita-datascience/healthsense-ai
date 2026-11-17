@@ -48,3 +48,4 @@ def test_judge_reply_parsing():
         assert g.llm_output_check(DIAGNOSIS) is True
     finally:
         g.ask = original
+
