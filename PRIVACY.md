@@ -9,6 +9,10 @@ diagnosis or treatment.
   generate a reply.
 - Conversation history is stored under a pseudonymous identifier
   (a one-way hash), not under your phone number.
+- Lab reports you send (photo or PDF) are downloaded into memory, read once
+  to produce an explanation, and then discarded. The file itself is never
+  saved. The reader is instructed not to copy your name, ID, phone number or
+  address; the explanation we send you is stored like any other reply.
 
 ## What we do not do
 - We do not sell or share your data with third parties.

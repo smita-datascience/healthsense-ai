@@ -1,4 +1,4 @@
-"""Send messages through the WhatsApp Cloud API."""
+"""Send messages through the WhatsApp Cloud API, and download media users send."""
 import logging
 
 import httpx
@@ -46,3 +46,33 @@ def send_text(to: str, body: str) -> None:
             # recipients, etc.) but never the token itself.
             log.error("WhatsApp send failed %s: %s", resp.status_code, resp.text)
             resp.raise_for_status()
+
+
+# Matches the report reader's limit; checked BEFORE downloading.
+MAX_MEDIA_BYTES = 10 * 1024 * 1024
+
+
+class MediaTooLarge(Exception):
+    """The file is bigger than we are willing to download."""
+
+
+def download_media(media_id: str) -> tuple[bytes, str]:
+    """Fetch a file the user sent. Returns (bytes, mime_type).
+
+    Meta's media download is two calls: the media ID gives a short-lived URL
+    (valid ~5 minutes), and that URL - also needing the access token - gives
+    the bytes. The file is kept in memory only, never written to disk.
+    """
+    headers = {"Authorization": f"Bearer {settings.whatsapp_access_token}"}
+    meta_url = f"https://graph.facebook.com/{settings.whatsapp_api_version}/{media_id}"
+    info = httpx.get(meta_url, headers=headers, timeout=20)
+    info.raise_for_status()
+    info = info.json()
+    if int(info.get("file_size") or 0) > MAX_MEDIA_BYTES:
+        raise MediaTooLarge(info.get("file_size"))
+
+    resp = httpx.get(info["url"], headers=headers, timeout=60)
+    resp.raise_for_status()
+    if len(resp.content) > MAX_MEDIA_BYTES:
+        raise MediaTooLarge(len(resp.content))
+    return resp.content, info.get("mime_type", "")
