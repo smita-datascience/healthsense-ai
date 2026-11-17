@@ -5,6 +5,7 @@ from config.settings import settings
 from app.memory.memory import recent_history, save_interaction
 from app.agents.tools import search_health_knowledge
 from app.safety.guardrails import check_input, check_output
+from app.core.language import detect_language, to_english, from_english
 
 llm = LLM(model=f"anthropic/{settings.llm_model}")
 
@@ -34,12 +35,26 @@ explainer_agent = Agent(
 
 
 def answer(question: str, user_id: str = "demo_user") -> str:
-    """Run the triage -> explainer crew, with memory and guardrails."""
-    # INPUT GUARDRAIL: emergency check BEFORE the agent runs
-    emergency = check_input(question)
+    """Run the triage -> explainer crew, with memory and guardrails.
+
+    Multi-language flow - "English core, translation at the edges":
+      detect language (rules)  ->  input gate on the ORIGINAL message
+      ->  translate question to English  ->  crew runs in English
+      ->  output guardrail on the ENGLISH answer  ->  translate answer back.
+    The guardrail always reads English, the language its patterns are written
+    in; translation happens only after the answer has passed it.
+    """
+    lang = detect_language(question)
+
+    # INPUT GUARDRAIL: emergency check BEFORE the agent runs. Runs on the
+    # original text - no translation step can drop or soften a symptom first.
+    emergency = check_input(question, lang)
     if emergency:
         save_interaction(user_id, question, emergency)
         return emergency
+
+    # The crew, retrieval and output guardrail all work in English.
+    question_en = to_english(question) if lang != "en" else question
 
     history = recent_history(user_id, limit=3)
     history_block = f"\nRecent conversation:\n{history}\n" if history else ""
@@ -47,7 +62,7 @@ def answer(question: str, user_id: str = "demo_user") -> str:
     triage_task = Task(
         description=(
             f"{history_block}"
-            f"Assess this health question: {question}\n"
+            f"Assess this health question: {question_en}\n"
             "State the main topic, how urgent it seems (low/medium/high), and "
             "what a good answer should focus on. Use the conversation history if "
             "the question refers to something earlier. Do NOT answer the question."
@@ -59,10 +74,12 @@ def answer(question: str, user_id: str = "demo_user") -> str:
     explain_task = Task(
         description=(
             f"{history_block}"
-            f"First, use the search_health_knowledge tool to look up facts about: {question}\n"
+            f"First, use the search_health_knowledge tool to look up facts about: {question_en}\n"
             "Then, using the triage assessment and retrieved facts, write a "
             "plain-language answer. Base it on the retrieved facts. If the "
-            "question refers to earlier conversation, use that context. End with "
+            "question refers to earlier conversation, use that context. Write "
+            "the answer in English, even if the history is in another language "
+            "- it is translated for the user after the safety check. End with "
             "one line reminding the user this is general information, not a "
             "diagnosis or medical advice."
         ),
@@ -79,8 +96,17 @@ def answer(question: str, user_id: str = "demo_user") -> str:
     )
     result = str(crew.kickoff())
 
-    blocked = check_output(result)
+    # OUTPUT GUARDRAIL: on the English answer, before any translation.
+    blocked = check_output(result, lang)
     if blocked:
         result = blocked
+    elif lang != "en":
+        try:
+            translated = from_english(result, lang)
+            # Second, cheap pass on the translation: number+unit patterns
+            # ("500 mg") are the same in any script.
+            result = check_output(translated, lang) or translated
+        except Exception:
+            pass  # translation failed: send the already-checked English answer
     save_interaction(user_id, question, result)
     return result

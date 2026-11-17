@@ -2,6 +2,7 @@
 import re
 import unicodedata
 
+from app.core.language import detect_language
 from app.core.llm import ask
 
 EMERGENCY_TERMS = [
@@ -58,18 +59,57 @@ def _normalise(text: str) -> str:
     return unicodedata.normalize("NFC", t)
 
 
-EMERGENCY_MESSAGE = (
-    "This may be a medical emergency. Please contact emergency services "
-    "immediately - in India call 112 (or 108 for an ambulance). "
-    "If someone is in danger, do not wait for an online response."
-)
+# Safety messages are PRE-TRANSLATED fixed text, never generated at runtime.
+# The emergency message must come out even when the LLM is down, and must say
+# exactly the same thing every time. (Translations should be reviewed by a
+# native Hindi speaker before real-world use.)
+EMERGENCY_MESSAGES = {
+    "en": (
+        "This may be a medical emergency. Please contact emergency services "
+        "immediately - in India call 112 (or 108 for an ambulance). "
+        "If someone is in danger, do not wait for an online response."
+    ),
+    "hi": (
+        "यह एक मेडिकल इमरजेंसी हो सकती है। कृपया तुरंत आपातकालीन सेवाओं से "
+        "संपर्क करें - भारत में 112 पर कॉल करें (एम्बुलेंस के लिए 108)। "
+        "अगर किसी की जान खतरे में है, तो ऑनलाइन जवाब का इंतज़ार न करें।"
+    ),
+    "hinglish": (
+        "Yeh ek medical emergency ho sakti hai. Kripya turant emergency "
+        "services ko call karein - India mein 112 dial karein (ambulance ke "
+        "liye 108). Agar kisi ki jaan khatre mein hai, to online jawab ka "
+        "intezaar na karein."
+    ),
+}
 
-BLOCKED_MESSAGE = (
-    "I can't share that response. It contained specific dosing or diagnostic "
-    "language, which only a licensed healthcare professional can safely give "
-    "you. Please speak to a doctor or pharmacist about your situation.\n\n"
-    "I'm happy to explain conditions, terminology, or general health topics instead."
-)
+BLOCKED_MESSAGES = {
+    "en": (
+        "I can't share that response. It contained specific dosing or diagnostic "
+        "language, which only a licensed healthcare professional can safely give "
+        "you. Please speak to a doctor or pharmacist about your situation.\n\n"
+        "I'm happy to explain conditions, terminology, or general health topics instead."
+    ),
+    "hi": (
+        "मैं यह जवाब नहीं दिखा सकता। इसमें दवा की खुराक या बीमारी की पहचान "
+        "(डायग्नोसिस) से जुड़ी बातें थीं, जो सिर्फ़ एक लाइसेंस प्राप्त डॉक्टर ही "
+        "सुरक्षित रूप से बता सकते हैं। कृपया अपनी स्थिति के बारे में डॉक्टर या "
+        "फार्मासिस्ट से बात करें।\n\n"
+        "मैं बीमारियों, मेडिकल शब्दों या सामान्य स्वास्थ्य विषयों को समझाने में "
+        "ख़ुशी से मदद कर सकता हूँ।"
+    ),
+    "hinglish": (
+        "Main yeh jawab share nahi kar sakta. Ismein dawa ki dose ya diagnosis "
+        "se judi baatein thi, jo sirf ek licensed doctor hi safely bata sakte "
+        "hain. Kripya apni situation ke baare mein doctor ya pharmacist se baat "
+        "karein.\n\n"
+        "Main bimariyon, medical terms ya general health topics samjhane mein "
+        "khushi se madad kar sakta hoon."
+    ),
+}
+
+# English versions under the old names, so existing code keeps working.
+EMERGENCY_MESSAGE = EMERGENCY_MESSAGES["en"]
+BLOCKED_MESSAGE = BLOCKED_MESSAGES["en"]
 
 DOSING_PATTERNS = [
     r"\b\d+\s?(mg|mcg|ml|g|units?|iu)\b",
@@ -134,8 +174,11 @@ def llm_emergency_check(question: str) -> bool:
     return "EMERGENCY" in result
 
 
-def check_input(question: str):
+def check_input(question: str, lang: str | None = None):
     """Input gate. Returns None if safe, or an escalation message if not.
+
+    The escalation message is in the user's language (detected by rules, no
+    API call), so it still comes out in Hindi when the LLM is unreachable.
 
     Cascade:
       Layer 1  deterministic keyword screen. Does NOT block on its own - it
@@ -153,22 +196,28 @@ def check_input(question: str):
     deterministic layer is the floor, not the ceiling. The gate never
     disappears because a service did.
     """
+    lang = lang or detect_language(question)
+    emergency_message = EMERGENCY_MESSAGES.get(lang, EMERGENCY_MESSAGE)
     q = _normalise(question)
     keyword_hit = any(_normalise(term) in q for term in EMERGENCY_TERMS)
 
     try:
         if llm_emergency_check(question):
-            return EMERGENCY_MESSAGE
+            return emergency_message
     except Exception:
         if keyword_hit:
-            return EMERGENCY_MESSAGE
+            return emergency_message
         raise
 
     return None
 
 
-def check_output(answer: str):
+def check_output(answer: str, lang: str = "en"):
     """Output guardrail. Returns None if safe, or a safe replacement if not.
+
+    The patterns are English, so this is run on the English answer BEFORE it
+    is translated (see app/core/language.py). `lang` only picks which
+    language the replacement message is shown in.
 
     Unsafe text is WITHHELD, not annotated: a caution appended below dosing
     advice still leaves the dosing advice on screen.
@@ -177,6 +226,6 @@ def check_output(answer: str):
 
     for pattern in DOSING_PATTERNS + DIAGNOSIS_PATTERNS:
         if re.search(pattern, a):
-            return BLOCKED_MESSAGE
+            return BLOCKED_MESSAGES.get(lang, BLOCKED_MESSAGE)
 
     return None
