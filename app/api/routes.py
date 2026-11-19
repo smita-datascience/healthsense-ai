@@ -23,4 +23,14 @@ def health():
 @router.post("/ask")
 def ask_endpoint(req: AskRequest):
     """Send a health question to the agent and return its answer."""
-    return {"answer": answer(req.question)}
+    try:
+        return {"answer": answer(req.question)}
+    except Exception:
+        # Save the full error to a file, because CrewAI's long console
+        # output pushes tracebacks out of the terminal.
+        import datetime
+        import traceback
+        with open("ask_errors.log", "a", encoding="utf-8") as f:
+            f.write(f"\n===== {datetime.datetime.now()} | question: {req.question}\n")
+            f.write(traceback.format_exc())
+        raise

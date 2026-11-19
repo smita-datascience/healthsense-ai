@@ -7,31 +7,42 @@ from app.agents.tools import search_health_knowledge
 from app.safety.guardrails import check_input, check_output
 from app.core.language import detect_language, to_english, from_english
 
-llm = LLM(model=f"anthropic/{settings.llm_model}")
 
-triage_agent = Agent(
-    role="Health Triage Specialist",
-    goal="Assess what a health question is really asking and how urgent it is.",
-    backstory=(
-        "A careful triage nurse. You classify a question: topic, urgency, and "
-        "what the answer should focus on. You never answer it - only assess it."
-    ),
-    llm=llm,
-    verbose=True,
-)
+# Agents are built FRESH for every question (see answer() below).
+# CrewAI agent executors cannot be shared between requests running at the
+# same time - a shared, module-level agent fails under concurrent load with
+# "Executor is already running" (found by the Locust stress test).
 
-explainer_agent = Agent(
-    role="Health Information Explainer",
-    goal="Write a clear, cautious, plain-language answer using the triage assessment.",
-    backstory=(
-        "A health-literacy expert. You take the triage assessment and write a "
-        "simple explanation. You never diagnose and always recommend "
-        "professional care for anything specific or serious."
-    ),
-    llm=llm,
-    tools=[search_health_knowledge],
-    verbose=True,
-)
+def make_llm() -> LLM:
+    return LLM(model=f"anthropic/{settings.llm_model}")
+
+
+def make_triage_agent(llm: LLM) -> Agent:
+    return Agent(
+        role="Health Triage Specialist",
+        goal="Assess what a health question is really asking and how urgent it is.",
+        backstory=(
+            "A careful triage nurse. You classify a question: topic, urgency, and "
+            "what the answer should focus on. You never answer it - only assess it."
+        ),
+        llm=llm,
+        verbose=False,
+    )
+
+
+def make_explainer_agent(llm: LLM) -> Agent:
+    return Agent(
+        role="Health Information Explainer",
+        goal="Write a clear, cautious, plain-language answer using the triage assessment.",
+        backstory=(
+            "A health-literacy expert. You take the triage assessment and write a "
+            "simple explanation. You never diagnose and always recommend "
+            "professional care for anything specific or serious."
+        ),
+        llm=llm,
+        tools=[search_health_knowledge],
+        verbose=False,
+    )
 
 
 def answer(question: str, user_id: str = "demo_user") -> str:
@@ -58,6 +69,11 @@ def answer(question: str, user_id: str = "demo_user") -> str:
 
     history = recent_history(user_id, limit=3)
     history_block = f"\nRecent conversation:\n{history}\n" if history else ""
+
+    # Fresh agents for THIS question only - safe under concurrent requests.
+    llm = make_llm()
+    triage_agent = make_triage_agent(llm)
+    explainer_agent = make_explainer_agent(llm)
 
     triage_task = Task(
         description=(
@@ -92,7 +108,7 @@ def answer(question: str, user_id: str = "demo_user") -> str:
         agents=[triage_agent, explainer_agent],
         tasks=[triage_task, explain_task],
         process=Process.sequential,
-        verbose=True,
+        verbose=False,
     )
     result = str(crew.kickoff())
 
