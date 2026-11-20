@@ -25,5 +25,13 @@ class Settings(BaseSettings):
     whatsapp_verify_token: str = ""
     whatsapp_api_version: str = "v25.0"
 
+    # --- Voice notes: speech-to-text (OpenAI) ---
+    # Claude cannot take audio input, so voice notes are transcribed first,
+    # then the TEXT goes through the same safety gates as a typed message.
+    openai_api_key: str = ""
+    # gpt-transcribe is OpenAI's recommended model; whisper-1 and the
+    # gpt-4o-*-transcribe models are deprecated (shut down 26 Feb 2027).
+    stt_model: str = "gpt-transcribe"
+
 
 settings = Settings()

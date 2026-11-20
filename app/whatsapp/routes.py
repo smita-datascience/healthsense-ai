@@ -5,6 +5,7 @@ Flow for a message:
                                                      \\--> background:
         text           -> crew.answer()             -> send_text()
         image / PDF    -> download -> explain_report() -> send_text()
+        voice note     -> download -> transcribe -> crew.answer() -> send_text()
 
 We answer Meta immediately and do the slow crew run afterwards, because Meta
 retries any delivery that isn't acknowledged quickly.
@@ -27,14 +28,25 @@ FALLBACK_REPLY = (
     "If this is an emergency, call 112 or go to the nearest hospital."
 )
 NON_TEXT_REPLY = (
-    "I can read typed messages, and lab reports sent as a photo or PDF. "
-    "Please type your health question or send your report."
+    "I can read typed messages, voice notes, and lab reports sent as a photo "
+    "or PDF. Please type or record your health question, or send your report."
 )
 TOO_LARGE_REPLY = (
     "That file is too large for me to read (limit 10 MB). "
     "Please send a photo of the results page instead."
 )
+AUDIO_FORMAT_REPLY = (
+    "Sorry, I couldn't play that audio format. Please hold the microphone "
+    "button in WhatsApp to record a voice note, or type your question. "
+    "If this is an emergency, call 112 or go to the nearest hospital."
+)
+EMPTY_AUDIO_REPLY = (
+    "Sorry, I couldn't hear anything in that voice note. Please try again in "
+    "a quieter place, or type your question. "
+    "If this is an emergency, call 112 or go to the nearest hospital."
+)
 MEDIA_TYPES = {"image", "document"}
+AUDIO_TYPES = {"audio"}
 
 
 @router.get("")
@@ -66,7 +78,8 @@ def extract_messages(payload: dict) -> list[dict]:
         for change in entry.get("changes", []):
             value = change.get("value", {})
             for msg in value.get("messages", []) or []:
-                media = msg.get(msg.get("type") or "") if msg.get("type") in MEDIA_TYPES else None
+                mtype = msg.get("type") or ""
+                media = msg.get(mtype) if mtype in MEDIA_TYPES | AUDIO_TYPES else None
                 media = media if isinstance(media, dict) else {}
                 out.append(
                     {
@@ -82,9 +95,29 @@ def extract_messages(payload: dict) -> list[dict]:
     return out
 
 
+def _answer_voice_note(msg: dict, user_id: str) -> str:
+    """Voice note -> text -> the SAME answer() path as a typed message.
+
+    The transcript is shown back to the user ("what I heard") so a misheard
+    word is visible straight away - in health, one wrong word can change the
+    meaning. The input safety gate runs on the transcript, exactly as it runs
+    on typed text.
+    """
+    from app.core.speech import transcribe
+    from app.agents.crew import answer
+
+    data, mime_type = download_media(msg["media_id"])
+    heard = transcribe(data, mime_type or msg.get("mime_type", ""))
+    reply = answer(heard, user_id=user_id)
+    return f'🎤 "{heard}"\n\n{reply}'
+
+
 def process_message(msg: dict) -> None:
     """Runs after the 200 has gone back to Meta."""
+    from app.core.speech import EmptyTranscript, UnsupportedAudio
+
     phone = msg["from"]
+    user_id = pseudonymous_user_id(phone)
     try:
         if msg["type"] in MEDIA_TYPES and msg.get("media_id"):
             # Lab report: same safety gates, different front end.
@@ -94,8 +127,11 @@ def process_message(msg: dict) -> None:
             reply = explain_report(
                 data, mime_type or msg.get("mime_type", ""),
                 caption=msg.get("caption", ""),
-                user_id=pseudonymous_user_id(phone),
+                user_id=user_id,
             )
+        elif msg["type"] in AUDIO_TYPES and msg.get("media_id"):
+            # Voice note: transcribe, then the typed-message path, unchanged.
+            reply = _answer_voice_note(msg, user_id)
         elif msg["type"] != "text" or not msg["text"].strip():
             reply = NON_TEXT_REPLY
         else:
@@ -104,11 +140,15 @@ def process_message(msg: dict) -> None:
             # unchanged; the channel adds nothing in front of or behind it.
             from app.agents.crew import answer
 
-            reply = answer(msg["text"], user_id=pseudonymous_user_id(phone))
+            reply = answer(msg["text"], user_id=user_id)
     except MediaTooLarge:
         reply = TOO_LARGE_REPLY
+    except UnsupportedAudio:
+        reply = AUDIO_FORMAT_REPLY
+    except EmptyTranscript:
+        reply = EMPTY_AUDIO_REPLY
     except Exception:
-        log.exception("Crew failed for message %s", msg["id"])
+        log.exception("Processing failed for message %s", msg["id"])
         reply = FALLBACK_REPLY
     try:
         send_text(phone, reply)
