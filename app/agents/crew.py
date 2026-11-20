@@ -1,18 +1,72 @@
 ﻿"""Triage -> Explainer crew for HealthSense AI, with memory + guardrails."""
+import datetime
+import os
+import threading
+import time
+import traceback
+from contextlib import contextmanager
+
 from crewai import Agent, Task, Crew, Process, LLM
 
 from config.settings import settings
 from app.memory.memory import recent_history, save_interaction
 from app.agents.tools import search_health_knowledge
-from app.safety.guardrails import check_input, check_output
+from app.safety.guardrails import (
+    check_input,
+    check_output,
+    UNAVAILABLE_MESSAGES,
+    UNAVAILABLE_MESSAGE,
+)
 from app.core.language import detect_language, to_english, from_english
 
 
+# ---------------------------------------------------------------------------
+# Timing (Locust stress test follow-up): measure each stage of a request so
+# we speed up the step that is actually slow, not the one we guess is slow.
+# One line per request goes to the console and to timings.csv.
+# ---------------------------------------------------------------------------
+TIMINGS_FILE = "timings.csv"
+STAGES = ["input_gate", "translate_in", "crew", "output_gate", "translate_out"]
+_timings_lock = threading.Lock()  # requests run in parallel threads
+
+
+@contextmanager
+def _timed(timings: dict, stage: str):
+    start = time.perf_counter()
+    try:
+        yield
+    finally:
+        timings[stage] = time.perf_counter() - start
+
+
+def _record_timings(timings: dict, lang: str, outcome: str, total: float) -> None:
+    parts = " ".join(f"{s}={timings[s]:.1f}s" for s in STAGES if s in timings)
+    print(f"[timing] lang={lang} outcome={outcome} {parts} total={total:.1f}s", flush=True)
+
+    row = [datetime.datetime.now().isoformat(timespec="seconds"), lang, outcome]
+    row += [f"{timings[s]:.2f}" if s in timings else "" for s in STAGES]
+    row.append(f"{total:.2f}")
+    with _timings_lock:
+        new_file = not os.path.exists(TIMINGS_FILE)
+        with open(TIMINGS_FILE, "a", encoding="utf-8") as f:
+            if new_file:
+                f.write(",".join(["time", "lang", "outcome", *STAGES, "total"]) + "\n")
+            f.write(",".join(row) + "\n")
+
+
+def _log_failure(stage: str, question: str) -> None:
+    """Save the full error, because the user only sees the fixed message."""
+    with open("ask_errors.log", "a", encoding="utf-8") as f:
+        f.write(f"\n===== {datetime.datetime.now()} | stage: {stage} | question: {question}\n")
+        f.write(traceback.format_exc())
+
+
+# ---------------------------------------------------------------------------
 # Agents are built FRESH for every question (see answer() below).
 # CrewAI agent executors cannot be shared between requests running at the
 # same time - a shared, module-level agent fails under concurrent load with
 # "Executor is already running" (found by the Locust stress test).
-
+# ---------------------------------------------------------------------------
 def make_llm() -> LLM:
     return LLM(model=f"anthropic/{settings.llm_model}")
 
@@ -45,31 +99,7 @@ def make_explainer_agent(llm: LLM) -> Agent:
     )
 
 
-def answer(question: str, user_id: str = "demo_user") -> str:
-    """Run the triage -> explainer crew, with memory and guardrails.
-
-    Multi-language flow - "English core, translation at the edges":
-      detect language (rules)  ->  input gate on the ORIGINAL message
-      ->  translate question to English  ->  crew runs in English
-      ->  output guardrail on the ENGLISH answer  ->  translate answer back.
-    The guardrail always reads English, the language its patterns are written
-    in; translation happens only after the answer has passed it.
-    """
-    lang = detect_language(question)
-
-    # INPUT GUARDRAIL: emergency check BEFORE the agent runs. Runs on the
-    # original text - no translation step can drop or soften a symptom first.
-    emergency = check_input(question, lang)
-    if emergency:
-        save_interaction(user_id, question, emergency)
-        return emergency
-
-    # The crew, retrieval and output guardrail all work in English.
-    question_en = to_english(question) if lang != "en" else question
-
-    history = recent_history(user_id, limit=3)
-    history_block = f"\nRecent conversation:\n{history}\n" if history else ""
-
+def _run_crew(question_en: str, history_block: str) -> str:
     # Fresh agents for THIS question only - safe under concurrent requests.
     llm = make_llm()
     triage_agent = make_triage_agent(llm)
@@ -110,19 +140,77 @@ def answer(question: str, user_id: str = "demo_user") -> str:
         process=Process.sequential,
         verbose=False,
     )
-    result = str(crew.kickoff())
+    return str(crew.kickoff())
+
+
+def answer(question: str, user_id: str = "demo_user") -> str:
+    """Run the triage -> explainer crew, with memory and guardrails.
+
+    Multi-language flow - "English core, translation at the edges":
+      detect language (rules)  ->  input gate on the ORIGINAL message
+      ->  translate question to English  ->  crew runs in English
+      ->  output guardrail on the ENGLISH answer  ->  translate answer back.
+    The guardrail always reads English, the language its patterns are written
+    in; translation happens only after the answer has passed it.
+
+    Never silence: if the LLM service is unreachable (outage, credits, rate
+    limit) the user gets a fixed, pre-translated UNAVAILABLE message that still
+    gives the emergency numbers - never an HTTP 500 or an empty WhatsApp reply.
+    """
+    t0 = time.perf_counter()
+    timings: dict = {}
+    lang = detect_language(question)
+    unavailable = UNAVAILABLE_MESSAGES.get(lang, UNAVAILABLE_MESSAGE)
+
+    # INPUT GUARDRAIL: emergency check BEFORE the agent runs. Runs on the
+    # original text - no translation step can drop or soften a symptom first.
+    # If the LLM classifier is down, check_input still blocks keyword hits
+    # (the floor); otherwise it re-raises and we send the UNAVAILABLE message.
+    try:
+        with _timed(timings, "input_gate"):
+            emergency = check_input(question, lang)
+    except Exception:
+        _log_failure("input_gate", question)
+        _record_timings(timings, lang, "unavailable", time.perf_counter() - t0)
+        return unavailable
+
+    if emergency:
+        save_interaction(user_id, question, emergency)
+        _record_timings(timings, lang, "emergency", time.perf_counter() - t0)
+        return emergency
+
+    history = recent_history(user_id, limit=3)
+    history_block = f"\nRecent conversation:\n{history}\n" if history else ""
+
+    # The crew, retrieval and output guardrail all work in English.
+    try:
+        with _timed(timings, "translate_in"):
+            question_en = to_english(question) if lang != "en" else question
+        with _timed(timings, "crew"):
+            result = _run_crew(question_en, history_block)
+    except Exception:
+        _log_failure("crew", question)
+        _record_timings(timings, lang, "unavailable", time.perf_counter() - t0)
+        return unavailable
 
     # OUTPUT GUARDRAIL: on the English answer, before any translation.
-    blocked = check_output(result, lang)
+    # check_output is already fail-safe (flagged + judge down = blocked).
+    with _timed(timings, "output_gate"):
+        blocked = check_output(result, lang)
+    outcome = "answered"
     if blocked:
         result = blocked
+        outcome = "blocked"
     elif lang != "en":
         try:
-            translated = from_english(result, lang)
-            # Second, cheap pass on the translation: number+unit patterns
-            # ("500 mg") are the same in any script.
-            result = check_output(translated, lang) or translated
+            with _timed(timings, "translate_out"):
+                translated = from_english(result, lang)
+                # Second, cheap pass on the translation: number+unit patterns
+                # ("500 mg") are the same in any script.
+                result = check_output(translated, lang) or translated
         except Exception:
             pass  # translation failed: send the already-checked English answer
+
     save_interaction(user_id, question, result)
+    _record_timings(timings, lang, outcome, time.perf_counter() - t0)
     return result

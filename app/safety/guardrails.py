@@ -111,6 +111,31 @@ BLOCKED_MESSAGES = {
 EMERGENCY_MESSAGE = EMERGENCY_MESSAGES["en"]
 BLOCKED_MESSAGE = BLOCKED_MESSAGES["en"]
 
+# Sent when the LLM service itself is unreachable (outage, credits, rate limit)
+# and no keyword fired. The user must NEVER get silence: a fixed message that
+# still points to emergency numbers is the fail-safe. Fixed text, so it works
+# with the API down. (Found by the Locust stress test: an API failure used to
+# crash /ask with HTTP 500 and WhatsApp users got no reply at all.)
+UNAVAILABLE_MESSAGES = {
+    "en": (
+        "Sorry, I can't answer right now because a service I depend on is "
+        "unavailable. Please try again in a few minutes. If this might be an "
+        "emergency, don't wait - call 112 now (or 108 for an ambulance)."
+    ),
+    "hi": (
+        "माफ़ कीजिए, अभी मैं आपके सवाल का जवाब नहीं दे पा रहा हूँ। कृपया थोड़ी "
+        "देर बाद फिर से कोशिश करें। अगर यह इमरजेंसी हो सकती है, तो इंतज़ार न "
+        "करें - तुरंत 112 पर कॉल करें (एम्बुलेंस के लिए 108)।"
+    ),
+    "hinglish": (
+        "Maaf kijiye, abhi main aapke sawaal ka jawab nahi de pa raha hoon. "
+        "Kripya thodi der baad phir se try karein. Agar yeh emergency ho sakti "
+        "hai, to intezaar na karein - turant 112 par call karein (ambulance ke "
+        "liye 108)."
+    ),
+}
+UNAVAILABLE_MESSAGE = UNAVAILABLE_MESSAGES["en"]
+
 DOSING_PATTERNS = [
     r"\b\d+\s?(mg|mcg|ml|g|units?|iu)\b",
     r"\btake\s+(\d+|one|two|three|a|an)\b.*\b(tablet|capsule|pill|dose|drop)",
@@ -195,6 +220,10 @@ def check_input(question: str, lang: str | None = None):
     a silently broken function - a message that hit a keyword is BLOCKED. The
     deterministic layer is the floor, not the ceiling. The gate never
     disappears because a service did.
+
+    If Layer 2 cannot run AND no keyword fired, this function re-raises. The
+    caller (app/agents/crew.py answer()) catches that and sends the fixed
+    UNAVAILABLE message, which still gives the emergency numbers.
     """
     lang = lang or detect_language(question)
     emergency_message = EMERGENCY_MESSAGES.get(lang, EMERGENCY_MESSAGE)
