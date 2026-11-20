@@ -111,12 +111,17 @@ def _run_crew(question_en: str, history_block: str) -> str:
             f"Assess this health question: {question_en}\n"
             "State the main topic, how urgent it seems (low/medium/high), and "
             "what a good answer should focus on. Use the conversation history if "
-            "the question refers to something earlier. Do NOT answer the question."
+            "the question refers to something earlier. Do NOT answer the question. "
+            "Keep it to 3 short lines."
         ),
-        expected_output="A short assessment: topic, urgency, and what to focus on.",
+        expected_output="Three short lines: topic, urgency, and what to focus on.",
         agent=triage_agent,
     )
 
+    # Answer length (timing follow-up): the crew was ~93% of request time and
+    # translating long answers back to Hindi/Hinglish took ~20 s. Answers are
+    # read on WhatsApp, so they are kept phone-sized: shorter to generate,
+    # shorter to translate, easier to read.
     explain_task = Task(
         description=(
             f"{history_block}"
@@ -125,11 +130,18 @@ def _run_crew(question_en: str, history_block: str) -> str:
             "plain-language answer. Base it on the retrieved facts. If the "
             "question refers to earlier conversation, use that context. Write "
             "the answer in English, even if the history is in another language "
-            "- it is translated for the user after the safety check. End with "
-            "one line reminding the user this is general information, not a "
-            "diagnosis or medical advice."
+            "- it is translated for the user after the safety check.\n\n"
+            "The answer is read on a phone in WhatsApp, so keep it short: about "
+            "150-200 words. Start with one or two plain sentences, then at most "
+            "5 short bullet points. No headings, no tables. Include when to see "
+            "a doctor if it matters for this question. End with one line "
+            "reminding the user this is general information, not a diagnosis or "
+            "medical advice."
         ),
-        expected_output="A clear, friendly answer with a brief disclaimer.",
+        expected_output=(
+            "A short, friendly WhatsApp-sized answer (about 150-200 words) with a "
+            "brief disclaimer as the last line."
+        ),
         agent=explainer_agent,
         context=[triage_task],
     )
