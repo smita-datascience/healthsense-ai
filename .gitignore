@@ -7,3 +7,7 @@ venv/
 .pytest_cache/
 .idea/
 .vscode/
+
+# local test output
+timings.csv
+ask_errors.log

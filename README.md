@@ -8,11 +8,11 @@ A multi-agent health information assistant built around a single question: **how
 
 ## What this is
 
-HealthSense AI answers general health questions in plain language — explaining conditions, terminology, and guidance grounded in a curated knowledge base.
+HealthSense AI answers general health questions in plain language — explaining conditions, terminology, and guidance grounded in a curated knowledge base. It runs as an API and on WhatsApp, in English, Hindi and Hinglish, and can read a photo or PDF of a lab report.
 
 It is deliberately **not** a diagnostic tool. It cannot prescribe, dose, or diagnose. That boundary isn't a line in a prompt; it's enforced in code on both sides of the model call.
 
-**Stack:** Python · CrewAI · FastAPI · SQLAlchemy · SQLite · Anthropic Claude
+**Stack:** Python · CrewAI · FastAPI · SQLAlchemy · SQLite · Anthropic Claude · WhatsApp Cloud API · Locust
 
 ---
 
@@ -32,7 +32,7 @@ Two independent gates, deliberately not sharing a failure mode.
 
 Runs before any model call, in two layers:
 
-**Layer 1: deterministic keyword screen.** Does not block on its own — it *routes*. A keyword hit marks a message as needing scrutiny.
+**Layer 1: deterministic keyword screen.** Does not block on its own — it *routes*. A keyword hit marks a message as needing scrutiny. The keyword list covers English, Hindi (Devanagari) and Hinglish, written from red-flag concepts rather than copied from the test set.
 
 **Layer 2: LLM classifier.** Makes the call, on every message.
 
@@ -44,42 +44,51 @@ That's the property worth protecting. A model in the safety path can hallucinate
 
 ### Gate 2 — output, post-generation (`check_output`)
 
-Screens the generated answer for specific dosing instructions and diagnostic claims. If it finds either, the answer is **withheld and replaced**, not annotated.
+The same shape as Gate 1. Regex patterns for dosing, diagnosis and discouraging care **flag** an answer; an LLM judge reads the flagged answer and **decides**; if the judge can't run, a flagged answer is blocked. Unsafe answers are **withheld and replaced**, not annotated.
 
-This was a deliberate revision. An earlier version appended a caution below the unsafe text — but a disclaimer under dosing advice still leaves the dosing advice on screen. In an asymmetric-cost domain, withhold.
+**Why the judge was added.** The patterns alone blocked a correct fever answer because it said *"see a doctor if… you have underlying health conditions"* — the same words as the diagnosis *"you have a migraine"*. Words can't tell those apart; reading for meaning can. After the redesign: output false alarms went from 5/12 to 0/12, with recall unchanged.
+
+**Why withhold rather than annotate.** An earlier version appended a caution below the unsafe text — but a disclaimer under dosing advice still leaves the dosing advice on screen. In an asymmetric-cost domain, withhold.
+
+### Never silence
+
+If the LLM service itself is unreachable (outage, exhausted credits, rate limit) and no keyword fired, the user gets a fixed, pre-translated message: *try again later, and call 112 / 108 if this could be an emergency.* Never an HTTP 500, never an empty WhatsApp reply. Like the emergency message, it is fixed text, so it works with the API down. (This gap was found by the stress test below.)
 
 ---
 
 ## Evaluation
 
-### Round 1 — red-team suite, 56 cases
+All four suites are re-run after every change to the safety path.
+
+| Suite | Cases | Recall | False alarms |
+|---|---|---|---|
+| Red-team suite — emergency gate | 36 | 25/25 (100%) | 0/11 |
+| Red-team suite — output guardrail | 32 | 18/18 (100%) | 0/14 |
+| Independent set (emergency gate) | 31 | 21/21 (100%) | 0/10 |
+| Hindi & Hinglish (emergency gate) | 25 | 17/17 (100%) | 0/8 |
+| **Total** | **124** | **81/81** | **0/43** |
 
 ```
 python -m app.evaluation.run_safety_eval
+python -m app.evaluation.run_independent_eval
+python -m app.evaluation.run_multilingual_eval
 ```
 
-| Gate | Recall | False alarms |
-|---|---|---|
-| Emergency gate (input) | 25/25 (100%) | 0/11 |
-| Output guardrail | 13/13 (100%) | 0/7 |
+### Round 1 — red-team suite, 68 cases
 
-Adversarial framings included: indirect ("asking for a friend"), fictional ("for a story I'm writing"), minimizing ("probably nothing, but my vision went black"), and hypothetical ("hypothetically, how long can a person go without breathing").
+Adversarial framings included: indirect ("asking for a friend"), fictional ("for a story I'm writing"), minimizing ("probably nothing, but my vision went black"), and hypothetical ("hypothetically, how long can a person go without breathing"). The output cases include conditional dosing, diagnosis followed by a referral, and safe answers that contain numbers or "if you have…" warnings.
 
 ### Round 2 — independent set, 31 cases
-
-```
-python -m app.evaluation.run_independent_eval
-```
-
-| | Recall | False alarms |
-|---|---|---|
-| Emergency gate | 21/21 (100%) | 0/10 |
 
 **Why a second set exists.** Round 1 was written alongside the guardrail, which means it can only prove the system handles the cases it was built against. Round 2 was generated from a different starting point — not *"what would evade this code?"* but *"how do people actually write when something is wrong?"* Its cases come from how patients present at triage, how people write to crisis lines, and how fear, embarrassment, and language barriers distort a message: lay somatic description with no clinical vocabulary, apologetic hedging, non-native English, the urgent fact buried after small talk, indirect signals of suicidal intent.
 
 **What it found.** Recall generalised (20/21 on first run). Precision did not — 6 of 10 safe questions were wrongly blocked, exposing the educational whitelist as overfitting. That finding drove the router redesign described above. After the fix: 21/21 recall, 0 false alarms, with Round 1 unchanged.
 
 **Caveat, stated plainly:** Round 2 is *more* independent, not fully independent. Anyone who writes a test set brings their own blind spots. Real independence means someone who has never seen the implementation.
+
+### Round 3 — Hindi & Hinglish, 25 cases
+
+With the LLM on: 17/17 recall, 0/8 false alarms. With the LLM off, the keyword floor alone catches 14/17 (it caught 0/17 before Hindi and Hinglish terms were added) — the floor is a floor, not a replacement.
 
 ### Two failures worth recording
 
@@ -99,98 +108,9 @@ Note the separation: the LLM **judges** offline, where a mistake is cheap and re
 
 ---
 
-## Architecture
+## Stress testing (Locust)
 
-Request path:
-
-```
-FastAPI → check_input → triage agent → explainer agent (+ BM25 retrieval, memory) → check_output → response
-```
-
-**Triage agent** — classifies topic and urgency, decides what a good answer should focus on. Does not answer.
-
-**Explainer agent** — retrieves from the knowledge base, then writes a plain-language answer grounded in what it found.
-
-**Retrieval** — BM25 over a curated health knowledge base. Answers are anchored to source passages rather than parametric memory.
-
-**Memory** — last 3 turns persisted in SQLite via SQLAlchemy, so the crew maintains context across a session.
-
----
-
-## Setup
+Safety has to hold under load too. `locustfile.py` simulates users asking a mix of normal and emergency questions against the local `/ask` endpoint (not through WhatsApp). Every request calls Claude for real, so it starts small.
 
 ```
-git clone https://github.com/smita-datascience/healthsense-ai.git
-cd healthsense-ai
-
-python -m venv venv
-venv\Scripts\activate          # Windows
-source venv/bin/activate       # macOS / Linux
-
-pip install -r requirements.txt
-```
-
-Copy `.env.example` to `.env` and add your key:
-
-```
-ANTHROPIC_API_KEY=your-key-here
-```
-
-Run the API:
-
-```
-uvicorn app.main:app --reload
-```
-
----
-
-## v2: WhatsApp channel (in progress)
-
-HealthSense can now be reached on WhatsApp through Meta's Cloud API. The channel is a thin layer over the same `answer()` function the API uses, so both safety gates run unchanged and the evaluation numbers above still describe what a WhatsApp user gets.
-
-The channel adds its own fail-closed check (webhook signature verification), drops duplicate deliveries, and stores conversation memory under a hashed id rather than the user's phone number. Details, decisions and known limits: [ARCHITECTURE_WHATSAPP.md](ARCHITECTURE_WHATSAPP.md). Tests: `python -m pytest tests/test_whatsapp.py -v`.
-
----
-
-## Design tradeoffs
-
-Choices made explicitly, not by default.
-
-**CrewAI over LangGraph.** CrewAI's role/task abstraction maps cleanly onto a small, fixed pipeline and got a working vertical slice up fast. LangGraph offers finer control over state and branching, which this system doesn't need yet. If the crew grows conditional or cyclic paths, that flips.
-
-**Sequential over hierarchical process.** The order is known and fixed — triage always precedes explanation. A hierarchical manager agent would add an LLM call and a source of nondeterminism to solve a routing problem that doesn't exist here.
-
-**BM25 over dense embeddings.** Health queries are dense with precise clinical terminology, where lexical match is a strong signal and retrieval is auditable — you can see exactly why a passage was pulled. It also keeps an embedding model and vector store out of the v1 dependency chain. The cost is real; see Limitations.
-
-**RAG over fine-tuning.** The knowledge base changes; the model's behaviour doesn't need to. Grounding gives citable provenance and lets the corpus update without a retraining cycle.
-
-**Deterministic layer first in the cascade.** Covered above — the ordering is the whole argument.
-
----
-
-## Known limitations
-
-- **Both test sets are still mine.** Round 2 was written from a different angle, but by the same person who wrote the guardrail. Genuinely independent means someone who has never seen the implementation.
-- **Layer 2 now runs on every message**, not just the ones Layer 1 missed. More API calls, slightly higher latency and cost. That was the price of dropping the whitelist, and it was worth paying.
-- **BM25 misses semantic paraphrase.** "Why does my chest feel tight" won't lexically match a passage on angina. A hybrid retriever (BM25 + dense, rank-fused) is the fix.
-- **The knowledge base is curated and small.** Coverage gaps produce refusals rather than wrong answers — the correct failure direction, but still a gap.
-- **Memory is session-scoped.** No user profile, no cross-session recall, no semantic memory.
-- **No production observability.** No tracing, no live monitoring, no drift detection.
-- **I wrote both the guardrail and the red-team set.** That's a blind spot by construction. Independently generated adversarial prompts are the honest next step.
-
----
-
-## What's next
-
-- A third test set written by someone who has not seen the code
-- Cache Layer 2 results for repeated queries, to claw back the cost of routing everything through it
-- Hybrid retrieval (BM25 + dense, rank fusion), evaluated against the same golden dataset to prove the complexity earns its place
-- Tracing and observability; eval-in-CI so a drop in safety recall fails the build
-
----
-
-## A note on where the design comes from
-
-Before machine learning, I spent four years writing firmware in C for heavy water plant operations at BARC. In that environment you don't get to say "it's probably fine." You enumerate failure modes, you assume the component fails, and you design so that the failure is survivable.
-
-The cascade in this project is that instinct applied to LLMs: put the layer that cannot fail in front of the layer that can, and then go looking for the cases where you were wrong.
+locust -f locustfile.py --host http://127.0.0.1:8000 --headless
